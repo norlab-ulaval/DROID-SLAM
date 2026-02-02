@@ -23,38 +23,86 @@ def show_image(image):
     cv2.imshow('image', image / 255.0)
     cv2.waitKey(1)
 
-def image_stream(imagedir, calib, stride):
+def image_stream(imagedir, calib, stride, stereo=False):
     """ image generator """
 
-    calib = np.loadtxt(calib, delimiter=" ")
-    fx, fy, cx, cy = calib[:4]
+    K_l = K_r = None
+    D_l = D_r = None
 
-    K = np.eye(3)
-    K[0,0] = fx
-    K[0,2] = cx
-    K[1,1] = fy
-    K[1,2] = cy
+    if stereo:
+        import json
+        calib_l_path = os.path.join(imagedir, 'calib', 'zedx_left.json')
+        calib_r_path = os.path.join(imagedir, 'calib', 'zedx_right.json')
 
-    image_list = sorted(os.listdir(imagedir))[::stride]
+        if not os.path.exists(calib_l_path) or not os.path.exists(calib_r_path):
+            print(f"Error: Stereo calibration files not found at {calib_l_path} or {calib_r_path}")
+            sys.exit(1)
 
-    for t, imfile in enumerate(image_list):
-        image = cv2.imread(os.path.join(imagedir, imfile))
-        if len(calib) > 4:
-            image = cv2.undistort(image, K, calib[4:])
+        with open(calib_l_path, 'r') as f:
+            data_l = json.load(f)
+            k_l = data_l['k']
+            K_l = np.array(k_l).reshape(3, 3)
+            D_l = np.array(data_l['d'])
 
-        h0, w0, _ = image.shape
+        with open(calib_r_path, 'r') as f:
+            data_r = json.load(f)
+            k_r = data_r['k']
+            K_r = np.array(k_r).reshape(3, 3)
+            D_r = np.array(data_r['d'])
+
+        fx, fy, cx, cy = K_l[0,0], K_l[1,1], K_l[0,2], K_l[1,2]
+
+    else:
+        calib = np.loadtxt(calib, delimiter=" ")
+        fx, fy, cx, cy = calib[:4]
+
+        K = np.eye(3)
+        K[0,0] = fx
+        K[0,2] = cx
+        K[1,1] = fy
+        K[1,2] = cy
+        K_l = K
+
+    if stereo:
+        imagedir_left = os.path.join(imagedir, 'image_left')
+        imagedir_right = os.path.join(imagedir, 'image_right')
+        image_list_left = sorted(os.listdir(imagedir_left))[::stride]
+        image_list_right = sorted(os.listdir(imagedir_right))[::stride]
+        assert len(image_list_left) == len(image_list_right)
+    else:
+        image_list = sorted(os.listdir(imagedir))[::stride]
+
+    for t, imfile in enumerate(image_list_left if stereo else image_list):
+        if stereo:
+            image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
+            image_right = cv2.imread(os.path.join(imagedir_right, image_list_right[t]))
+            
+            # undistort with specific params
+            image_left = cv2.undistort(image_left, K_l, D_l)
+            image_right = cv2.undistort(image_right, K_r, D_r)
+            
+            images = [image_left, image_right]
+        else:
+            image = cv2.imread(os.path.join(imagedir, imfile))
+            if len(calib) > 4:
+                image = cv2.undistort(image, K_l, calib[4:])
+            images = [image]
+
+        h0, w0, _ = images[0].shape
         h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
         w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
 
-        image = cv2.resize(image, (w1, h1))
-        image = image[:h1-h1%8, :w1-w1%8]
-        image = torch.as_tensor(image).permute(2, 0, 1)
+        images = [cv2.resize(img, (w1, h1)) for img in images]
+        images = [img[:h1-h1%8, :w1-w1%8] for img in images]
+        images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
+        
+        images = torch.stack(images)
 
         intrinsics = torch.as_tensor([fx, fy, cx, cy])
         intrinsics[0::2] *= (w1 / w0)
         intrinsics[1::2] *= (h1 / h0)
 
-        yield t, image[None], intrinsics
+        yield t, images, intrinsics
 
 
 def save_reconstruction(droid, save_path):
@@ -106,9 +154,9 @@ if __name__ == '__main__':
     parser.add_argument("--backend_device", type=str, default="cuda")
     
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
+    parser.add_argument("--stereo", action="store_true")
     args = parser.parse_args()
 
-    args.stereo = False
     torch.multiprocessing.set_start_method('spawn')
 
     droid = None
@@ -118,7 +166,7 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    for (t, image, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.stride)):
+    for (t, image, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.stride, args.stereo)):
         if t < args.t0:
             continue
 
@@ -131,7 +179,7 @@ if __name__ == '__main__':
         
         droid.track(t, image, intrinsics=intrinsics)
 
-    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride))
+    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride, args.stereo))
     
     if args.reconstruction_path is not None:
         save_reconstruction(droid, args.reconstruction_path)
