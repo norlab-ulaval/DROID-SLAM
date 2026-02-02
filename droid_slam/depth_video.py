@@ -19,7 +19,7 @@ class DepthVideo:
         self.wd = wd = image_size[1]
 
         ### state attributes ###
-        self.tstamp = torch.zeros(buffer, device=device, dtype=torch.float).share_memory_()
+        self.tstamp = torch.zeros(buffer, device=device, dtype=torch.double).share_memory_()
         self.images = torch.zeros(buffer, 3, ht, wd, device=device, dtype=torch.uint8)
         self.dirty = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()
         self.red = torch.zeros(buffer, device=device, dtype=torch.bool).share_memory_()

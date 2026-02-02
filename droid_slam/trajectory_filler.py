@@ -42,7 +42,7 @@ class PoseTrajectoryFiller:
     def __fill(self, tstamps, images, intrinsics):
         """ fill operator """
 
-        tt = torch.as_tensor(tstamps, device="cuda")
+        tt = torch.as_tensor(tstamps, device="cuda", dtype=torch.double)
         images = torch.stack(images, 0).cuda()
         intrinsics = torch.stack(intrinsics, 0)
         inputs = images[:,:,[2,1,0]].to(self.device) / 255.0
@@ -57,11 +57,11 @@ class PoseTrajectoryFiller:
         t0 = torch.as_tensor([ts[ts<=t].shape[0] - 1 for t in tstamps])
         t1 = torch.where(t0<N-1, t0+1, t0)
 
-        dt = ts[t1] - ts[t0] + 1e-3
+        dt = (ts[t1] - ts[t0]).float() + 1e-3
         dP = Ps[t1] * Ps[t0].inv()
 
         v = dP.log() / dt.unsqueeze(-1)
-        w = v * (tt - ts[t0]).unsqueeze(-1)
+        w = v * (tt - ts[t0]).float().unsqueeze(-1)
         Gs = SE3.exp(w) * Ps[t0]
 
         # extract features (no need for context features)
