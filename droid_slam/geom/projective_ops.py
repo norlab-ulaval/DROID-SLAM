@@ -7,7 +7,7 @@ MIN_DEPTH = 0.2
 
 
 def extract_intrinsics(intrinsics):
-    return intrinsics[..., None, None, :].unbind(dim=-1)
+    return intrinsics[..., None, None, :4].unbind(dim=-1)
 
 
 def coords_grid(ht, wd, **kwargs):
@@ -173,9 +173,15 @@ def projective_transform(
     # transform
     Gij = poses[:, jj] * poses[:, ii].inv()
 
-    Gij.data[:, ii == jj] = torch.as_tensor(
-        [-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device="cuda"
+    baseline = intrinsics[..., 4]
+    edge_baselines = baseline[:, ii] # Shape (B, N)
+    
+    mask = (ii == jj)
+    Gij.data[:, mask] = torch.tensor(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], device="cuda"
     )
+    # Set x translation to -baseline
+    Gij.data[:, mask, 0] = -edge_baselines[:, mask]
     X1, Ja = actp(Gij, X0, jacobian=jacobian)
 
     # project (pinhole)
