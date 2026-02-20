@@ -122,6 +122,27 @@ def backend_process(args, depth_video1, depth_video2, device="cuda"):
                 backend(num_iters, normalize=False)
 
                 if is_last_iteration:
+                    if hasattr(args, 'weight_output_dir') and args.weight_output_dir:
+                        import os
+                        import cv2
+                        import numpy as np
+                        print("Saving confidence maps...")
+                        graph = backend.graph
+                        if graph.weight.shape[1] > 0:
+                            weights = graph.weight.cpu().numpy()
+                            ii = graph.ii.cpu().numpy()
+                            jj = graph.jj.cpu().numpy()
+                            if not os.path.exists(args.weight_output_dir):
+                                os.makedirs(args.weight_output_dir)
+                            for k in range(weights.shape[1]):
+                                w = weights[0, k]
+                                w_mean = np.mean(w, axis=-1)
+                                w_img = (w_mean * 255).astype(np.uint8)
+                                fname = os.path.join(args.weight_output_dir, f"{ii[k]:05d}_{jj[k]:05d}.png")
+                                cv2.imwrite(fname, w_img)
+                            print("Confidence maps saved.")
+                        else:
+                            print("No weights found in graph.")
                     break
 
                 if not depth_video2.ready.value > 0:

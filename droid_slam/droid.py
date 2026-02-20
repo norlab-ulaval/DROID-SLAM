@@ -81,6 +81,28 @@ class Droid:
         print("#" * 32)
         self.backend(12)
 
+        if hasattr(self.args, 'weight_output_dir') and self.args.weight_output_dir:
+            import os
+            import cv2
+            import numpy as np
+            print("Saving confidence maps...")
+            graph = self.backend.graph
+            if graph.weight.shape[1] > 0:
+                weights = graph.weight.cpu().numpy()
+                ii = graph.ii.cpu().numpy()
+                jj = graph.jj.cpu().numpy()
+                if not os.path.exists(self.args.weight_output_dir):
+                    os.makedirs(self.args.weight_output_dir)
+                for k in range(weights.shape[1]):
+                    w = weights[0, k]
+                    w_mean = np.mean(w, axis=-1)
+                    w_img = (w_mean * 255).astype(np.uint8)
+                    fname = os.path.join(self.args.weight_output_dir, f"{ii[k]:05d}_{jj[k]:05d}.png")
+                    cv2.imwrite(fname, w_img)
+                print("Confidence maps saved.")
+            else:
+                print("No weights found in graph.")
+
         camera_trajectory = self.traj_filler(stream)
         return camera_trajectory.inv().data.cpu().numpy()
 

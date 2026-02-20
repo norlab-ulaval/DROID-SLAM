@@ -5,6 +5,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 import lietorch
+from lietorch import SE3
 import cv2
 import os
 import glob 
@@ -64,8 +65,8 @@ def image_stream(imagedir, calib, stride, stereo=False):
         K_l = K
 
     if stereo:
-        imagedir_left = os.path.join(imagedir, 'image_left')
-        imagedir_right = os.path.join(imagedir, 'image_right')
+        imagedir_left = os.path.join(imagedir, 'zedx_left')
+        imagedir_right = os.path.join(imagedir, 'zedx_right')
         image_list_left = sorted(os.listdir(imagedir_left))[::stride]
         image_list_right = sorted(os.listdir(imagedir_right))[::stride]
         assert len(image_list_left) == len(image_list_right)
@@ -98,9 +99,10 @@ def image_stream(imagedir, calib, stride, stereo=False):
         
         images = torch.stack(images)
 
-        intrinsics = torch.as_tensor([fx, fy, cx, cy])
-        intrinsics[0::2] *= (w1 / w0)
-        intrinsics[1::2] *= (h1 / h0)
+        baseline = 0.1 # this gives better results than the true value -> correct scale afterwards
+        intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
+        intrinsics[0:4:2] *= (w1 / w0)
+        intrinsics[1:4:2] *= (h1 / h0)
 
         yield t, images, intrinsics
 
@@ -154,8 +156,15 @@ if __name__ == '__main__':
     parser.add_argument("--backend_device", type=str, default="cuda")
     
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
+    parser.add_argument("--weight_output_dir", type=str, help="path to directory to save confidence maps")
     parser.add_argument("--stereo", action="store_true")
     args = parser.parse_args()
+
+    if args.weight_output_dir is None:
+        if args.reconstruction_path:
+            args.weight_output_dir = os.path.join(os.path.dirname(args.reconstruction_path), "exported_weights")
+        else:
+            args.weight_output_dir = "exported_weights"
 
     torch.multiprocessing.set_start_method('spawn')
 
@@ -181,5 +190,26 @@ if __name__ == '__main__':
 
     traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride, args.stereo))
     
+    # Save Trajectory (TUM Format) using C2W poses
+    if hasattr(droid, "video2"):
+        video = droid.video2
+    else:
+        video = droid.video
+    
+    tstamps = video.tstamp[:video.counter.value].cpu().numpy()
+    poses_c2w = SE3(video.poses[:video.counter.value]).inv().data.cpu().numpy()
+
+    output_folder = os.path.dirname(args.reconstruction_path) if args.reconstruction_path else "."
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    traj_path = os.path.join(output_folder, 'trajectory.txt')
+    print(f"Saving trajectory to {traj_path}...")
+    with open(traj_path, 'w') as f:
+        for i in range(len(poses_c2w)):
+            p = poses_c2w[i]
+            timestamp = tstamps[i]
+            f.write(f"{timestamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n")
+
     if args.reconstruction_path is not None:
         save_reconstruction(droid, args.reconstruction_path)
