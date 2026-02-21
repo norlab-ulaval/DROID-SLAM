@@ -1,6 +1,4 @@
 import torch
-import lietorch
-import numpy as np
 
 import time
 from lietorch import SE3
@@ -122,6 +120,7 @@ def backend_process(args, depth_video1, depth_video2, device="cuda"):
                 backend(num_iters, normalize=False)
 
                 if is_last_iteration:
+                    print("Starting Async Global Bundle Adjustment...")
                     if hasattr(args, 'weight_output_dir') and args.weight_output_dir:
                         import os
                         import cv2

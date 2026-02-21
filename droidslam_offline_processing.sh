@@ -5,7 +5,7 @@ input_path_host=/home/mbo/bigfoot-FoMo/ijrr
 
 process_trajectory() {
     local trajectory=$1
-    local output_path_host="/home/mbo/droidslam-offline/droidslam-${trajectory}"
+    local output_path_host="/home/mbo/hdd/droidslam-offline/droidslam-${trajectory}"
 
     for date_dir in "${input_path_host}"/*/; do
         date=$(basename "${date_dir}")
@@ -23,12 +23,13 @@ process_trajectory() {
                 --imagedir "${dataset_dir}" \
                 --stereo \
                 --disable_vis \
-                --reconstruction_path "${output_path_host}/${date}/${dataset}" \
+                --trajectory_path "${output_path_host}/${date}/${dataset}/${dataset}_${dataset}.txt" \
                 --buffer 6000 \
                 --t0 0 \
                 --stride 3 \
                 --beta 0.3 \
                 --filter_thresh 2.0 \
+                --weights /home/mbo/legs_ws/src/droid_slam_ros/droid.pth \
                 --warmup 4 \
                 --keyframe_thresh 4.0 \
                 --frontend_thresh 16.0 \

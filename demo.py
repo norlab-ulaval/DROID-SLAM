@@ -1,22 +1,16 @@
 import sys
 sys.path.append('droid_slam')
 
-from tqdm import tqdm
 import numpy as np
 import torch
-import lietorch
 from lietorch import SE3
 import cv2
 import os
-import glob 
 import time
 import argparse
 
-from torch.multiprocessing import Process
 from droid import Droid
 from droid_async import DroidAsync
-
-import torch.nn.functional as F
 
 
 def show_image(image):
@@ -104,7 +98,8 @@ def image_stream(imagedir, calib, stride, stereo=False):
         intrinsics[0:4:2] *= (w1 / w0)
         intrinsics[1:4:2] *= (h1 / h0)
 
-        yield t, images, intrinsics
+        tstamp_s = float(imfile.split('.')[0]) / 1e6
+        yield tstamp_s, images, intrinsics
 
 
 def save_reconstruction(droid, save_path):
@@ -115,6 +110,7 @@ def save_reconstruction(droid, save_path):
         video = droid.video
 
     t = video.counter.value
+    print(f"Extracting reconstruction data for {t} frames...")
     save_data = {
         "tstamps": video.tstamp[:t].cpu(),
         "images": video.images[:t].cpu(),
@@ -123,7 +119,9 @@ def save_reconstruction(droid, save_path):
         "intrinsics": video.intrinsics[:t].cpu()
     }
 
+    print(f"Saving reconstruction map to {save_path}...")
     torch.save(save_data, save_path)
+    print("Reconstruction saved successfully.")
 
 
 if __name__ == '__main__':
@@ -156,13 +154,19 @@ if __name__ == '__main__':
     parser.add_argument("--backend_device", type=str, default="cuda")
     
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
+    parser.add_argument("--trajectory_path", type=str, help="path to save trajectory file")
     parser.add_argument("--weight_output_dir", type=str, help="path to directory to save confidence maps")
     parser.add_argument("--stereo", action="store_true")
     args = parser.parse_args()
 
+    if args.reconstruction_path is not None and not args.reconstruction_path.endswith(('.pt', '.pth')):
+        args.reconstruction_path = os.path.join(args.reconstruction_path, 'reconstruction.pth')
+
     if args.weight_output_dir is None:
         if args.reconstruction_path:
             args.weight_output_dir = os.path.join(os.path.dirname(args.reconstruction_path), "exported_weights")
+        elif args.trajectory_path:
+            args.weight_output_dir = os.path.join(os.path.dirname(args.trajectory_path), "exported_weights")
         else:
             args.weight_output_dir = "exported_weights"
 
@@ -175,7 +179,9 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    for (t, image, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.stride, args.stereo)):
+    
+    start_time = time.time()
+    for t, (tstamp, image, intrinsics) in enumerate(image_stream(args.imagedir, args.calib, args.stride, args.stereo)):
         if t < args.t0:
             continue
 
@@ -185,9 +191,17 @@ if __name__ == '__main__':
         if droid is None:
             args.image_size = [image.shape[2], image.shape[3]]
             droid = DroidAsync(args) if args.asynchronous else Droid(args)
+            print(f"Initialized DROID-SLAM tracking. Frame size: {args.image_size}")
         
-        droid.track(t, image, intrinsics=intrinsics)
+        droid.track(tstamp, image, intrinsics=intrinsics)
 
+        if t % 50 == 0:
+            elapsed = time.time() - start_time
+            fps = (t + 1) / elapsed if elapsed > 0 else 0
+            print(f"Processing frame {t} ... ({fps:.2f} fps)")
+
+    print(f"Finished tracking {t + 1} frames. Total time: {time.time() - start_time:.2f} seconds.")
+    print("Terminating tracking and extracting poses...")
     traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride, args.stereo))
     
     # Save Trajectory (TUM Format) using C2W poses
@@ -199,11 +213,16 @@ if __name__ == '__main__':
     tstamps = video.tstamp[:video.counter.value].cpu().numpy()
     poses_c2w = SE3(video.poses[:video.counter.value]).inv().data.cpu().numpy()
 
-    output_folder = os.path.dirname(args.reconstruction_path) if args.reconstruction_path else "."
-    if not os.path.exists(output_folder):
+    if args.trajectory_path:
+        traj_path = args.trajectory_path
+        output_folder = os.path.dirname(traj_path)
+    else:
+        output_folder = os.path.dirname(args.reconstruction_path) if args.reconstruction_path else "."
+        traj_path = os.path.join(output_folder, 'trajectory.txt')
+        
+    if output_folder and not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    traj_path = os.path.join(output_folder, 'trajectory.txt')
     print(f"Saving trajectory to {traj_path}...")
     with open(traj_path, 'w') as f:
         for i in range(len(poses_c2w)):

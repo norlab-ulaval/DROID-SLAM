@@ -73,13 +73,15 @@ class Droid:
 
         del self.frontend
 
+        print("Starting Global Bundle Adjustment...")
         torch.cuda.empty_cache()
-        print("#" * 32)
+        print("Running Global BA (7 steps)...")
         self.backend(7)
 
         torch.cuda.empty_cache()
-        print("#" * 32)
+        print("Running Global BA (12 steps)...")
         self.backend(12)
+        print("Global Bundle Adjustment complete.")
 
         if hasattr(self.args, 'weight_output_dir') and self.args.weight_output_dir:
             import os

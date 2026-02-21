@@ -270,8 +270,9 @@ class FactorGraph:
         # alternate corr implementation
         t = self.video.counter.value
 
-        num, rig, ch, ht, wd = self.video.fmaps.shape
-        corr_op = AltCorrBlock(self.video.fmaps.view(1, num*rig, ch, ht, wd))
+        fmaps = self.video.fmaps[:t]
+        num, rig, ch, ht, wd = fmaps.shape
+        corr_op = AltCorrBlock(fmaps.view(1, num*rig, ch, ht, wd))
 
         for step in range(steps):
             # print("Global BA Iteration #{}".format(step+1))
