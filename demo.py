@@ -205,7 +205,7 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
         intrinsics[1:4:2] *= h1 / h0
 
         tstamp_s = float(imfile.split(".")[0]) / 1e6
-        
+
         return t, tstamp_s, images, intrinsics
 
     # The background thread that manages the batches
@@ -213,27 +213,27 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
         for batch_start in range(0, total_images, batch_size):
             batch_end = min(batch_start + batch_size, total_images)
             indices_to_process = range(batch_start, batch_end)
-            
+
             batch_results = []
-            
+
             # Use threads to fetch the chunk concurrently
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                 future_to_idx = {executor.submit(process_frame, idx): idx for idx in indices_to_process}
-                
+
                 for future in concurrent.futures.as_completed(future_to_idx):
                     try:
                         batch_results.append(future.result())
                     except Exception as exc:
                         idx = future_to_idx[future]
                         print(f"Frame {idx} generated an exception: {exc}")
-            
+
             # Sort the completed batch chronologically
             batch_results.sort(key=lambda x: x[0])
-            
+
             # Put the sorted batch in the queue.
             # If the queue is full (maxsize=1), this blocks until SLAM finishes the current batch.
             batch_queue.put(batch_results)
-            
+
         # Sentinel value to signal the generator that all batches are done
         batch_queue.put(None)
 
@@ -241,15 +241,15 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
     def generator():
         batch_size = 300
         num_workers = 20
-        
-        # maxsize=1 means memory holds maximum 2 batches at a time 
+
+        # maxsize=1 means memory holds maximum 2 batches at a time
         # (1 processing in SLAM, 1 waiting in queue)
         batch_queue = queue.Queue(maxsize=1)
-        
+
         # Start the background fetcher
         fetcher_thread = threading.Thread(
-            target=batch_fetcher, 
-            args=(batch_queue, batch_size, num_workers), 
+            target=batch_fetcher,
+            args=(batch_queue, batch_size, num_workers),
             daemon=True
         )
         fetcher_thread.start()
@@ -257,11 +257,11 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
         # Continually pull ready batches from the queue
         while True:
             current_batch = batch_queue.get()
-            
+
             # If we hit the sentinel value, break out
             if current_batch is None:
                 break
-                
+
             # Yield frames to the SLAM main loop
             for res in current_batch:
                 _, tstamp_s, images, intrinsics = res
@@ -472,7 +472,7 @@ if __name__ == "__main__":
 
     if args.pgo:
         print("Terminating tracking and extracting poses...")
-        image_gen, _ = image_stream_orig(args.imagedir, args.calib, args.stride, args.stereo, args.image_size)
+        image_gen, _ = image_stream(args.imagedir, args.calib, args.stride, args.stereo, args.image_size)
         traj_est = droid.terminate(image_gen)
 
         # Save Trajectory (TUM Format) using C2W poses
