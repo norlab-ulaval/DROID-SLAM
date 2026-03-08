@@ -26,6 +26,99 @@ def show_image(image):
     cv2.imshow("image", image / 255.0)
     cv2.waitKey(1)
 
+def image_stream_orig(imagedir, calib, stride, stereo, image_size):
+    """image generator"""
+
+    K_l = K_r = None
+    D_l = D_r = None
+
+    if stereo:
+        import json
+
+        calib_l_path = os.path.join(imagedir, "calib", "zedx_left.json")
+        calib_r_path = os.path.join(imagedir, "calib", "zedx_right.json")
+
+        if not os.path.exists(calib_l_path) or not os.path.exists(calib_r_path):
+            print(
+                f"Error: Stereo calibration files not found at {calib_l_path} or {calib_r_path}"
+            )
+            sys.exit(1)
+
+        with open(calib_l_path, "r") as f:
+            data_l = json.load(f)
+            k_l = data_l["k"]
+            K_l = np.array(k_l).reshape(3, 3)
+            D_l = np.array(data_l["d"])
+
+        with open(calib_r_path, "r") as f:
+            data_r = json.load(f)
+            k_r = data_r["k"]
+            K_r = np.array(k_r).reshape(3, 3)
+            D_r = np.array(data_r["d"])
+
+        fx, fy, cx, cy = K_l[0, 0], K_l[1, 1], K_l[0, 2], K_l[1, 2]
+
+    else:
+        calib = np.loadtxt(calib, delimiter=" ")
+        fx, fy, cx, cy = calib[:4]
+
+        K = np.eye(3)
+        K[0, 0] = fx
+        K[0, 2] = cx
+        K[1, 1] = fy
+        K[1, 2] = cy
+        K_l = K
+
+    if stereo:
+        imagedir_left = os.path.join(imagedir, "zedx_left")
+        imagedir_right = os.path.join(imagedir, "zedx_right")
+        image_list_left = sorted(os.listdir(imagedir_left))[::stride]
+        image_list_right = sorted(os.listdir(imagedir_right))[::stride]
+        assert len(image_list_left) == len(image_list_right)
+    else:
+        image_list = sorted(os.listdir(imagedir))[::stride]
+
+    total_images = len(image_list_left if stereo else image_list)
+
+    # Inner generator function
+    def generator():
+        for t, imfile in tqdm(enumerate(image_list_left if stereo else image_list), total=total_images, desc=f"Loading data", leave=False):
+            if stereo:
+                image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
+                image_right = cv2.imread(
+                    os.path.join(imagedir_right, image_list_right[t])
+                )
+
+                # undistort with specific params
+                image_left = cv2.undistort(image_left, K_l, D_l)
+                image_right = cv2.undistort(image_right, K_r, D_r)
+
+                images = [image_left, image_right]
+            else:
+                image = cv2.imread(os.path.join(imagedir, imfile))
+                if len(calib) > 4:
+                    image = cv2.undistort(image, K_l, calib[4:])
+                images = [image]
+
+            h0, w0, _ = images[0].shape
+            h1 = image_size[0]
+            w1 = image_size[1]
+
+            images = [cv2.resize(img, (w1, h1)) for img in images]
+            images = [img[: h1 - h1 % 8, : w1 - w1 % 8] for img in images]
+            images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
+
+            images = torch.stack(images)
+
+            baseline = 0.1  # this gives better results than the true value -> correct scale afterwards
+            intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
+            intrinsics[0:4:2] *= w1 / w0
+            intrinsics[1:4:2] *= h1 / h0
+
+            tstamp_s = float(imfile.split(".")[0]) / 1e6
+            yield tstamp_s, images, intrinsics
+
+    return generator(), total_images
 
 def image_stream(imagedir, calib, stride, stereo, image_size):
     """image generator with batched multithreaded prefetching"""
@@ -112,50 +205,65 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
         intrinsics[1:4:2] *= h1 / h0
 
         tstamp_s = float(imfile.split(".")[0]) / 1e6
-
-        # Return the index 't' so we can sort the batch later
+        
         return t, tstamp_s, images, intrinsics
 
-    def generator():
-        batch_size = 1000
-        num_workers = 20
-
+    # The background thread that manages the batches
+    def batch_fetcher(batch_queue, batch_size, num_workers):
         for batch_start in range(0, total_images, batch_size):
             batch_end = min(batch_start + batch_size, total_images)
             indices_to_process = range(batch_start, batch_end)
-
+            
             batch_results = []
-
-            # Progress bar for the current batch download/preprocess
-            pbar = tqdm(
-                total=len(indices_to_process),
-                desc=f"Loading Batch {batch_start // batch_size + 1}",
-                leave=False,
-            )
-
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=num_workers
-            ) as executor:
-                future_to_idx = {
-                    executor.submit(process_frame, idx): idx
-                    for idx in indices_to_process
-                }
-
+            
+            # Use threads to fetch the chunk concurrently
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_to_idx = {executor.submit(process_frame, idx): idx for idx in indices_to_process}
+                
                 for future in concurrent.futures.as_completed(future_to_idx):
                     try:
                         batch_results.append(future.result())
-                        pbar.update(1)  # Update bar as each worker finishes
                     except Exception as exc:
                         idx = future_to_idx[future]
-                        print(f"\nFrame {idx} generated an exception: {exc}")
-
-            pbar.close()
-
-            # Sort the jumbled results by frame index
+                        print(f"Frame {idx} generated an exception: {exc}")
+            
+            # Sort the completed batch chronologically
             batch_results.sort(key=lambda x: x[0])
+            
+            # Put the sorted batch in the queue.
+            # If the queue is full (maxsize=1), this blocks until SLAM finishes the current batch.
+            batch_queue.put(batch_results)
+            
+        # Sentinel value to signal the generator that all batches are done
+        batch_queue.put(None)
 
-            # Yield to the SLAM pipeline
-            for res in batch_results:
+    # The main generator function yielded to SLAM
+    def generator():
+        batch_size = 300
+        num_workers = 20
+        
+        # maxsize=1 means memory holds maximum 2 batches at a time 
+        # (1 processing in SLAM, 1 waiting in queue)
+        batch_queue = queue.Queue(maxsize=1)
+        
+        # Start the background fetcher
+        fetcher_thread = threading.Thread(
+            target=batch_fetcher, 
+            args=(batch_queue, batch_size, num_workers), 
+            daemon=True
+        )
+        fetcher_thread.start()
+
+        # Continually pull ready batches from the queue
+        while True:
+            current_batch = batch_queue.get()
+            
+            # If we hit the sentinel value, break out
+            if current_batch is None:
+                break
+                
+            # Yield frames to the SLAM main loop
+            for res in current_batch:
                 _, tstamp_s, images, intrinsics = res
                 yield tstamp_s, images, intrinsics
 
@@ -364,9 +472,7 @@ if __name__ == "__main__":
 
     if args.pgo:
         print("Terminating tracking and extracting poses...")
-        image_gen, num_of_images = image_stream(
-            args.imagedir, args.calib, args.stride, args.stereo, args.image_size
-        )
+        image_gen, _ = image_stream_orig(args.imagedir, args.calib, args.stride, args.stereo, args.image_size)
         traj_est = droid.terminate(image_gen)
 
         # Save Trajectory (TUM Format) using C2W poses

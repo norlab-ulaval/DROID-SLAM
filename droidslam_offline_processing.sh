@@ -1,18 +1,18 @@
 #!/bin/bash
-source ~/DROID-SLAM/.venv/bin/activate
+source $HOME/DROID-SLAM/.venv/bin/activate
 
-input_path_host=/home/mbo/bigfoot-FoMo/ijrr
+input_path_host=$HOME/bigfoot-FoMo/ijrr
 
 process_trajectory() {
     local trajectory=$1
-    local output_path_host="/home/mbo/output/droidslam-offline-final/droidslam-${trajectory}"
+    local output_path_host="$HOME/output/droidslam-offline-final/droidslam-${trajectory}"
 
     for date_dir in "${input_path_host}"/*/; do
         date=$(basename "${date_dir}")
         for dataset_dir in "${date_dir}${trajectory}_"*/; do
             [ -d "${dataset_dir}" ] || continue
             dataset=$(basename "${dataset_dir}")
-            if [[ $date != "2025-01-29" ]]; then
+            if [[ $date != "2025-10-14" ]]; then
                 continue
             fi
             echo $date
@@ -29,20 +29,20 @@ process_trajectory() {
                 --trajectory_path "${output_path_host}/${date}/${dataset}/${dataset}_${dataset}.txt" \
                 --buffer 10000 \
                 --t0 0 \
-                --stride 3 \
+                --stride 4 \
                 --beta 0.3 \
                 --filter_thresh 2.0 \
-                --weights /home/mbo/legs_ws/src/droid_slam_ros/droid.pth \
+                --weights $HOME/DROID-SLAM/droid.pth \
                 --warmup 4 \
                 --pgo \
-                --keyframe_thresh 4.0 \
+                --keyframe_thresh 6.0 \
                 --frontend_thresh 16.0 \
                 --frontend_window 50 \
                 --frontend_radius 2 \
                 --frontend_nms 1 \
                 --backend_thresh 22.0 \
                 --backend_radius 2 \
-                --backend_nms 5 \
+                --backend_nms 15 \
                 2>&1 | tee -a "$log_file"
 
             echo "END_TIME: $(date +%s)" >> "$log_file"
@@ -50,9 +50,9 @@ process_trajectory() {
     done
 }
 
-process_trajectory "orange"
+# process_trajectory "orange"
 # process_trajectory "yellow"
 # process_trajectory "blue"
 # process_trajectory "green"
 # process_trajectory "magenta"
-# process_trajectory "red"
+process_trajectory "red"
