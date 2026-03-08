@@ -1,9 +1,16 @@
+import queue
 import sys
+import threading
+
+from tqdm import tqdm
 
 sys.path.append("droid_slam")
 
 import argparse
+import concurrent.futures
+import json
 import os
+import sys
 import time
 
 import cv2
@@ -21,14 +28,12 @@ def show_image(image):
 
 
 def image_stream(imagedir, calib, stride, stereo, image_size):
-    """image generator"""
+    """image generator with batched multithreaded prefetching"""
 
     K_l = K_r = None
     D_l = D_r = None
 
     if stereo:
-        import json
-
         calib_l_path = os.path.join(imagedir, "calib", "zedx_left.json")
         calib_r_path = os.path.join(imagedir, "calib", "zedx_right.json")
 
@@ -74,43 +79,85 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
 
     total_images = len(image_list_left if stereo else image_list)
 
-    # Inner generator function
+    # Isolated worker function for a single frame index
+    def process_frame(t):
+        imfile = image_list_left[t] if stereo else image_list[t]
+
+        if stereo:
+            image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
+            image_right = cv2.imread(os.path.join(imagedir_right, image_list_right[t]))
+
+            image_left = cv2.undistort(image_left, K_l, D_l)
+            image_right = cv2.undistort(image_right, K_r, D_r)
+            images = [image_left, image_right]
+        else:
+            image = cv2.imread(os.path.join(imagedir, imfile))
+            if len(calib) > 4:
+                image = cv2.undistort(image, K_l, calib[4:])
+            images = [image]
+
+        h0, w0, _ = images[0].shape
+        h1 = image_size[0]
+        w1 = image_size[1]
+
+        images = [cv2.resize(img, (w1, h1)) for img in images]
+        images = [img[: h1 - h1 % 8, : w1 - w1 % 8] for img in images]
+        images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
+
+        images = torch.stack(images)
+
+        baseline = 0.1
+        intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
+        intrinsics[0:4:2] *= w1 / w0
+        intrinsics[1:4:2] *= h1 / h0
+
+        tstamp_s = float(imfile.split(".")[0]) / 1e6
+
+        # Return the index 't' so we can sort the batch later
+        return t, tstamp_s, images, intrinsics
+
     def generator():
-        for t, imfile in enumerate(image_list_left if stereo else image_list):
-            if stereo:
-                image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
-                image_right = cv2.imread(
-                    os.path.join(imagedir_right, image_list_right[t])
-                )
+        batch_size = 1000
+        num_workers = 20
 
-                # undistort with specific params
-                image_left = cv2.undistort(image_left, K_l, D_l)
-                image_right = cv2.undistort(image_right, K_r, D_r)
+        for batch_start in range(0, total_images, batch_size):
+            batch_end = min(batch_start + batch_size, total_images)
+            indices_to_process = range(batch_start, batch_end)
 
-                images = [image_left, image_right]
-            else:
-                image = cv2.imread(os.path.join(imagedir, imfile))
-                if len(calib) > 4:
-                    image = cv2.undistort(image, K_l, calib[4:])
-                images = [image]
+            batch_results = []
 
-            h0, w0, _ = images[0].shape
-            h1 = image_size[0]
-            w1 = image_size[1]
+            # Progress bar for the current batch download/preprocess
+            pbar = tqdm(
+                total=len(indices_to_process),
+                desc=f"Loading Batch {batch_start // batch_size + 1}",
+                leave=False,
+            )
 
-            images = [cv2.resize(img, (w1, h1)) for img in images]
-            images = [img[: h1 - h1 % 8, : w1 - w1 % 8] for img in images]
-            images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers
+            ) as executor:
+                future_to_idx = {
+                    executor.submit(process_frame, idx): idx
+                    for idx in indices_to_process
+                }
 
-            images = torch.stack(images)
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    try:
+                        batch_results.append(future.result())
+                        pbar.update(1)  # Update bar as each worker finishes
+                    except Exception as exc:
+                        idx = future_to_idx[future]
+                        print(f"\nFrame {idx} generated an exception: {exc}")
 
-            baseline = 0.1  # this gives better results than the true value -> correct scale afterwards
-            intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
-            intrinsics[0:4:2] *= w1 / w0
-            intrinsics[1:4:2] *= h1 / h0
+            pbar.close()
 
-            tstamp_s = float(imfile.split(".")[0]) / 1e6
-            yield tstamp_s, images, intrinsics
+            # Sort the jumbled results by frame index
+            batch_results.sort(key=lambda x: x[0])
+
+            # Yield to the SLAM pipeline
+            for res in batch_results:
+                _, tstamp_s, images, intrinsics = res
+                yield tstamp_s, images, intrinsics
 
     return generator(), total_images
 
