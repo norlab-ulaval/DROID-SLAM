@@ -1,105 +1,118 @@
 import sys
-sys.path.append('droid_slam')
 
-import numpy as np
-import torch
-from lietorch import SE3
-import cv2
+sys.path.append("droid_slam")
+
+import argparse
 import os
 import time
-import argparse
 
+import cv2
+import numpy as np
+import torch
 from droid import Droid
 from droid_async import DroidAsync
+from lietorch import SE3
 
 
 def show_image(image):
     image = image.permute(1, 2, 0).cpu().numpy()
-    cv2.imshow('image', image / 255.0)
+    cv2.imshow("image", image / 255.0)
     cv2.waitKey(1)
 
-def image_stream(imagedir, calib, stride, stereo=False):
-    """ image generator """
+
+def image_stream(imagedir, calib, stride, stereo, image_size):
+    """image generator"""
 
     K_l = K_r = None
     D_l = D_r = None
 
     if stereo:
         import json
-        calib_l_path = os.path.join(imagedir, 'calib', 'zedx_left.json')
-        calib_r_path = os.path.join(imagedir, 'calib', 'zedx_right.json')
+
+        calib_l_path = os.path.join(imagedir, "calib", "zedx_left.json")
+        calib_r_path = os.path.join(imagedir, "calib", "zedx_right.json")
 
         if not os.path.exists(calib_l_path) or not os.path.exists(calib_r_path):
-            print(f"Error: Stereo calibration files not found at {calib_l_path} or {calib_r_path}")
+            print(
+                f"Error: Stereo calibration files not found at {calib_l_path} or {calib_r_path}"
+            )
             sys.exit(1)
 
-        with open(calib_l_path, 'r') as f:
+        with open(calib_l_path, "r") as f:
             data_l = json.load(f)
-            k_l = data_l['k']
+            k_l = data_l["k"]
             K_l = np.array(k_l).reshape(3, 3)
-            D_l = np.array(data_l['d'])
+            D_l = np.array(data_l["d"])
 
-        with open(calib_r_path, 'r') as f:
+        with open(calib_r_path, "r") as f:
             data_r = json.load(f)
-            k_r = data_r['k']
+            k_r = data_r["k"]
             K_r = np.array(k_r).reshape(3, 3)
-            D_r = np.array(data_r['d'])
+            D_r = np.array(data_r["d"])
 
-        fx, fy, cx, cy = K_l[0,0], K_l[1,1], K_l[0,2], K_l[1,2]
+        fx, fy, cx, cy = K_l[0, 0], K_l[1, 1], K_l[0, 2], K_l[1, 2]
 
     else:
         calib = np.loadtxt(calib, delimiter=" ")
         fx, fy, cx, cy = calib[:4]
 
         K = np.eye(3)
-        K[0,0] = fx
-        K[0,2] = cx
-        K[1,1] = fy
-        K[1,2] = cy
+        K[0, 0] = fx
+        K[0, 2] = cx
+        K[1, 1] = fy
+        K[1, 2] = cy
         K_l = K
 
     if stereo:
-        imagedir_left = os.path.join(imagedir, 'zedx_left')
-        imagedir_right = os.path.join(imagedir, 'zedx_right')
+        imagedir_left = os.path.join(imagedir, "zedx_left")
+        imagedir_right = os.path.join(imagedir, "zedx_right")
         image_list_left = sorted(os.listdir(imagedir_left))[::stride]
         image_list_right = sorted(os.listdir(imagedir_right))[::stride]
         assert len(image_list_left) == len(image_list_right)
     else:
         image_list = sorted(os.listdir(imagedir))[::stride]
 
-    for t, imfile in enumerate(image_list_left if stereo else image_list):
-        if stereo:
-            image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
-            image_right = cv2.imread(os.path.join(imagedir_right, image_list_right[t]))
-            
-            # undistort with specific params
-            image_left = cv2.undistort(image_left, K_l, D_l)
-            image_right = cv2.undistort(image_right, K_r, D_r)
-            
-            images = [image_left, image_right]
-        else:
-            image = cv2.imread(os.path.join(imagedir, imfile))
-            if len(calib) > 4:
-                image = cv2.undistort(image, K_l, calib[4:])
-            images = [image]
+    total_images = len(image_list_left if stereo else image_list)
 
-        h0, w0, _ = images[0].shape
-        h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
-        w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
+    # Inner generator function
+    def generator():
+        for t, imfile in enumerate(image_list_left if stereo else image_list):
+            if stereo:
+                image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
+                image_right = cv2.imread(
+                    os.path.join(imagedir_right, image_list_right[t])
+                )
 
-        images = [cv2.resize(img, (w1, h1)) for img in images]
-        images = [img[:h1-h1%8, :w1-w1%8] for img in images]
-        images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
-        
-        images = torch.stack(images)
+                # undistort with specific params
+                image_left = cv2.undistort(image_left, K_l, D_l)
+                image_right = cv2.undistort(image_right, K_r, D_r)
 
-        baseline = 0.1 # this gives better results than the true value -> correct scale afterwards
-        intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
-        intrinsics[0:4:2] *= (w1 / w0)
-        intrinsics[1:4:2] *= (h1 / h0)
+                images = [image_left, image_right]
+            else:
+                image = cv2.imread(os.path.join(imagedir, imfile))
+                if len(calib) > 4:
+                    image = cv2.undistort(image, K_l, calib[4:])
+                images = [image]
 
-        tstamp_s = float(imfile.split('.')[0]) / 1e6
-        yield tstamp_s, images, intrinsics
+            h0, w0, _ = images[0].shape
+            h1 = image_size[0]
+            w1 = image_size[1]
+
+            images = [cv2.resize(img, (w1, h1)) for img in images]
+            images = [img[: h1 - h1 % 8, : w1 - w1 % 8] for img in images]
+            images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
+
+            images = torch.stack(images)
+
+            baseline = 0.1  # this gives better results than the true value -> correct scale afterwards
+            intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
+            intrinsics[0:4:2] *= w1 / w0
+            intrinsics[1:4:2] *= h1 / h0
+
+            tstamp_s = float(imfile.split(".")[0]) / 1e6
+            yield tstamp_s, images, intrinsics
+
+    return generator(), total_images
 
 
 def save_reconstruction(droid, save_path):
@@ -116,7 +129,7 @@ def save_reconstruction(droid, save_path):
         "images": video.images[:t].cpu(),
         "disps": video.disps_up[:t].cpu(),
         "poses": video.poses[:t].cpu(),
-        "intrinsics": video.intrinsics[:t].cpu()
+        "intrinsics": video.intrinsics[:t].cpu(),
     }
 
     print(f"Saving reconstruction map to {save_path}...")
@@ -124,7 +137,7 @@ def save_reconstruction(droid, save_path):
     print("Reconstruction saved successfully.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--imagedir", type=str, help="path to image directory")
     parser.add_argument("--calib", type=str, help="path to calibration file")
@@ -136,14 +149,45 @@ if __name__ == '__main__':
     parser.add_argument("--image_size", default=[240, 320])
     parser.add_argument("--disable_vis", action="store_true")
 
-    parser.add_argument("--beta", type=float, default=0.3, help="weight for translation / rotation components of flow")
-    parser.add_argument("--filter_thresh", type=float, default=2.4, help="how much motion before considering new keyframe")
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.3,
+        help="weight for translation / rotation components of flow",
+    )
+    parser.add_argument(
+        "--filter_thresh",
+        type=float,
+        default=2.4,
+        help="how much motion before considering new keyframe",
+    )
     parser.add_argument("--warmup", type=int, default=8, help="number of warmup frames")
-    parser.add_argument("--keyframe_thresh", type=float, default=4.0, help="threshold to create a new keyframe")
-    parser.add_argument("--frontend_thresh", type=float, default=16.0, help="add edges between frames whithin this distance")
-    parser.add_argument("--frontend_window", type=int, default=25, help="frontend optimization window")
-    parser.add_argument("--frontend_radius", type=int, default=2, help="force edges between frames within radius")
-    parser.add_argument("--frontend_nms", type=int, default=1, help="non-maximal supression of edges")
+    parser.add_argument(
+        "--keyframe_thresh",
+        type=float,
+        default=4.0,
+        help="threshold to create a new keyframe",
+    )
+    parser.add_argument(
+        "--frontend_thresh",
+        type=float,
+        default=16.0,
+        help="add edges between frames whithin this distance",
+    )
+    parser.add_argument(
+        "--frontend_window", type=int, default=25, help="frontend optimization window"
+    )
+    parser.add_argument(
+        "--frontend_radius",
+        type=int,
+        default=2,
+        help="force edges between frames within radius",
+    )
+    parser.add_argument(
+        "--frontend_nms", type=int, default=1, help="non-maximal supression of edges"
+    )
+
+    parser.add_argument("--pgo", action="store_true")
 
     parser.add_argument("--backend_thresh", type=float, default=22.0)
     parser.add_argument("--backend_radius", type=int, default=2)
@@ -152,25 +196,42 @@ if __name__ == '__main__':
     parser.add_argument("--asynchronous", action="store_true")
     parser.add_argument("--frontend_device", type=str, default="cuda")
     parser.add_argument("--backend_device", type=str, default="cuda")
-    
+
     parser.add_argument("--reconstruction_path", help="path to saved reconstruction")
-    parser.add_argument("--trajectory_path", type=str, help="path to save trajectory file")
-    parser.add_argument("--weight_output_dir", type=str, help="path to directory to save confidence maps")
+    parser.add_argument(
+        "--trajectory_path", type=str, help="path to save trajectory file"
+    )
+    parser.add_argument(
+        "--weight_output_dir",
+        type=str,
+        help="path to directory to save confidence maps",
+    )
     parser.add_argument("--stereo", action="store_true")
+    parser.add_argument(
+        "--max_frames", type=int, default=-1, help="max frames to evaluate"
+    )
     args = parser.parse_args()
 
-    if args.reconstruction_path is not None and not args.reconstruction_path.endswith(('.pt', '.pth')):
-        args.reconstruction_path = os.path.join(args.reconstruction_path, 'reconstruction.pth')
+    if args.reconstruction_path is not None and not args.reconstruction_path.endswith(
+        (".pt", ".pth")
+    ):
+        args.reconstruction_path = os.path.join(
+            args.reconstruction_path, "reconstruction.pth"
+        )
 
     if args.weight_output_dir is None:
         if args.reconstruction_path:
-            args.weight_output_dir = os.path.join(os.path.dirname(args.reconstruction_path), "exported_weights")
+            args.weight_output_dir = os.path.join(
+                os.path.dirname(args.reconstruction_path), "exported_weights"
+            )
         elif args.trajectory_path:
-            args.weight_output_dir = os.path.join(os.path.dirname(args.trajectory_path), "exported_weights")
+            args.weight_output_dir = os.path.join(
+                os.path.dirname(args.trajectory_path), "exported_weights"
+            )
         else:
             args.weight_output_dir = "exported_weights"
 
-    torch.multiprocessing.set_start_method('spawn')
+    torch.multiprocessing.set_start_method("spawn")
 
     droid = None
 
@@ -179,9 +240,32 @@ if __name__ == '__main__':
         args.upsample = True
 
     tstamps = []
-    
+    # Setup incremental odometry file
+    if args.trajectory_path:
+        incremental_odom_path = os.path.splitext(args.trajectory_path)[0] + "_odom.txt"
+        output_folder = os.path.dirname(args.trajectory_path)
+    else:
+        output_folder = (
+            os.path.dirname(args.reconstruction_path)
+            if args.reconstruction_path
+            else "."
+        )
+        incremental_odom_path = os.path.join(output_folder, "trajectory_odom.txt")
+
+    if output_folder and not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Open in write mode once to clear/create the file
+    open(incremental_odom_path, "w").close()
+
     start_time = time.time()
-    for t, (tstamp, image, intrinsics) in enumerate(image_stream(args.imagedir, args.calib, args.stride, args.stereo)):
+    image_gen, num_of_images = image_stream(
+        args.imagedir, args.calib, args.stride, args.stereo, args.image_size
+    )
+    for t, (tstamp, image, intrinsics) in enumerate(image_gen):
+        frame_time = time.time()
+        if args.max_frames > 0 and t >= args.max_frames:
+            break
         if t < args.t0:
             continue
 
@@ -189,46 +273,86 @@ if __name__ == '__main__':
             show_image(image[0])
 
         if droid is None:
-            args.image_size = [image.shape[2], image.shape[3]]
+            image_size = [image.shape[2], image.shape[3]]
             droid = DroidAsync(args) if args.asynchronous else Droid(args)
-            print(f"Initialized DROID-SLAM tracking. Frame size: {args.image_size}")
-        
+            print(f"Initialized DROID-SLAM tracking. Frame size: {image_size}")
+
         droid.track(tstamp, image, intrinsics=intrinsics)
 
-        if t % 50 == 0:
-            elapsed = time.time() - start_time
-            fps = (t + 1) / elapsed if elapsed > 0 else 0
-            print(f"Processing frame {t} ... ({fps:.2f} fps)")
+        odom_video = getattr(droid, "video1", getattr(droid, "video", None))
 
-    print(f"Finished tracking {t + 1} frames. Total time: {time.time() - start_time:.2f} seconds.")
-    print("Terminating tracking and extracting poses...")
-    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride, args.stereo))
-    
-    # Save Trajectory (TUM Format) using C2W poses
-    if hasattr(droid, "video2"):
-        video = droid.video2
+        if odom_video is not None and odom_video.counter.value > 0:
+            idx = odom_video.counter.value - 1
+            latest_tstamp = odom_video.tstamp[idx].cpu().item()
+
+            # Slice [idx:idx+1] to preserve the 2D tensor shape needed by SE3
+            latest_pose = odom_video.poses[idx : idx + 1]
+
+            # Convert to Camera-to-World
+            latest_pose_c2w = SE3(latest_pose).inv().data[0].cpu().numpy()
+
+            with open(incremental_odom_path, "a") as f:
+                p = latest_pose_c2w
+                f.write(
+                    f"{latest_tstamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n"
+                )
+
+        elapsed = time.time() - start_time
+        fps = (t + 1) / elapsed if elapsed > 0 else 0
+        print(
+            f"Processed frame {t}/{num_of_images} (tstamp={tstamp:.2f}) in {time.time() - frame_time:.2f} seconds."
+        )
+
+    print(
+        f"Finished tracking {t + 1} frames. Total time: {time.time() - start_time:.2f} seconds."
+    )
+
+    # Save Pre-SLAM Odometry Trajectory
+    if hasattr(droid, "video1"):
+        odom_video = droid.video1
+    elif hasattr(droid, "video"):
+        odom_video = droid.video
     else:
-        video = droid.video
-    
-    tstamps = video.tstamp[:video.counter.value].cpu().numpy()
-    poses_c2w = SE3(video.poses[:video.counter.value]).inv().data.cpu().numpy()
+        odom_video = None
 
-    if args.trajectory_path:
-        traj_path = args.trajectory_path
-        output_folder = os.path.dirname(traj_path)
-    else:
-        output_folder = os.path.dirname(args.reconstruction_path) if args.reconstruction_path else "."
-        traj_path = os.path.join(output_folder, 'trajectory.txt')
-        
-    if output_folder and not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+    if args.pgo:
+        print("Terminating tracking and extracting poses...")
+        image_gen, num_of_images = image_stream(
+            args.imagedir, args.calib, args.stride, args.stereo, args.image_size
+        )
+        traj_est = droid.terminate(image_gen)
 
-    print(f"Saving trajectory to {traj_path}...")
-    with open(traj_path, 'w') as f:
-        for i in range(len(poses_c2w)):
-            p = poses_c2w[i]
-            timestamp = tstamps[i]
-            f.write(f"{timestamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n")
+        # Save Trajectory (TUM Format) using C2W poses
+        if hasattr(droid, "video2"):
+            video = droid.video2
+        else:
+            video = droid.video
 
-    if args.reconstruction_path is not None:
-        save_reconstruction(droid, args.reconstruction_path)
+        tstamps = video.tstamp[: video.counter.value].cpu().numpy()
+        poses_c2w = SE3(video.poses[: video.counter.value]).inv().data.cpu().numpy()
+
+        if args.trajectory_path:
+            traj_path = args.trajectory_path
+            output_folder = os.path.dirname(traj_path)
+        else:
+            output_folder = (
+                os.path.dirname(args.reconstruction_path)
+                if args.reconstruction_path
+                else "."
+            )
+            traj_path = os.path.join(output_folder, "trajectory.txt")
+
+        if output_folder and not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        print(f"Saving trajectory to {traj_path}...")
+        with open(traj_path, "w") as f:
+            for i in range(len(poses_c2w)):
+                p = poses_c2w[i]
+                timestamp = tstamps[i]
+                f.write(
+                    f"{timestamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n"
+                )
+
+        if args.reconstruction_path is not None:
+            save_reconstruction(droid, args.reconstruction_path)

@@ -131,13 +131,16 @@ def backend_process(args, depth_video1, depth_video2, device="cuda"):
                             weights = graph.weight.cpu().numpy()
                             ii = graph.ii.cpu().numpy()
                             jj = graph.jj.cpu().numpy()
+                            tstamps = depth_video2.tstamp.cpu().numpy()
                             if not os.path.exists(args.weight_output_dir):
                                 os.makedirs(args.weight_output_dir)
                             for k in range(weights.shape[1]):
                                 w = weights[0, k]
                                 w_mean = np.mean(w, axis=-1)
                                 w_img = (w_mean * 255).astype(np.uint8)
-                                fname = os.path.join(args.weight_output_dir, f"{ii[k]:05d}_{jj[k]:05d}.png")
+                                t1 = tstamps[ii[k]]
+                                t2 = tstamps[jj[k]]
+                                fname = os.path.join(args.weight_output_dir, f"{t1:.6f}_{t2:.6f}.png")
                                 cv2.imwrite(fname, w_img)
                             print("Confidence maps saved.")
                         else:
