@@ -5,14 +5,14 @@ input_path_host=$HOME/bigfoot-FoMo/ijrr
 
 process_trajectory() {
     local trajectory=$1
-    local output_path_host="$HOME/output/droidslam-offline-final/droidslam-${trajectory}"
+    local output_path_host="$HOME/output/droidslam-offline-timestamps-from-online/droidslam-${trajectory}"
 
     for date_dir in "${input_path_host}"/*/; do
         date=$(basename "${date_dir}")
         for dataset_dir in "${date_dir}${trajectory}_"*/; do
             [ -d "${dataset_dir}" ] || continue
             dataset=$(basename "${dataset_dir}")
-            if [[ $date != "2025-10-14" ]]; then
+            if [[ $date == "2024-11-21" || $date == "2024-11-28" || $date == "2025-01-29" || $date == "2025-03-10" ]]; then
                 continue
             fi
             echo $date
@@ -25,11 +25,12 @@ process_trajectory() {
             python -u demo.py \
                 --imagedir "${dataset_dir}" \
                 --stereo \
+                --timestamps_path "$PWD/trajectories/${dataset}_${dataset}.txt" \
                 --disable_vis \
                 --trajectory_path "${output_path_host}/${date}/${dataset}/${dataset}_${dataset}.txt" \
                 --buffer 10000 \
                 --t0 0 \
-                --stride 4 \
+                --stride 1 \
                 --beta 0.3 \
                 --filter_thresh 2.0 \
                 --weights $HOME/DROID-SLAM/droid.pth \
@@ -50,9 +51,9 @@ process_trajectory() {
     done
 }
 
-# process_trajectory "orange"
-# process_trajectory "yellow"
+process_trajectory "yellow"
 # process_trajectory "blue"
 # process_trajectory "green"
 # process_trajectory "magenta"
-process_trajectory "red"
+# process_trajectory "orange"
+# process_trajectory "red"

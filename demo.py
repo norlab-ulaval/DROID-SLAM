@@ -26,101 +26,8 @@ def show_image(image):
     cv2.imshow("image", image / 255.0)
     cv2.waitKey(1)
 
-def image_stream_orig(imagedir, calib, stride, stereo, image_size):
-    """image generator"""
 
-    K_l = K_r = None
-    D_l = D_r = None
-
-    if stereo:
-        import json
-
-        calib_l_path = os.path.join(imagedir, "calib", "zedx_left.json")
-        calib_r_path = os.path.join(imagedir, "calib", "zedx_right.json")
-
-        if not os.path.exists(calib_l_path) or not os.path.exists(calib_r_path):
-            print(
-                f"Error: Stereo calibration files not found at {calib_l_path} or {calib_r_path}"
-            )
-            sys.exit(1)
-
-        with open(calib_l_path, "r") as f:
-            data_l = json.load(f)
-            k_l = data_l["k"]
-            K_l = np.array(k_l).reshape(3, 3)
-            D_l = np.array(data_l["d"])
-
-        with open(calib_r_path, "r") as f:
-            data_r = json.load(f)
-            k_r = data_r["k"]
-            K_r = np.array(k_r).reshape(3, 3)
-            D_r = np.array(data_r["d"])
-
-        fx, fy, cx, cy = K_l[0, 0], K_l[1, 1], K_l[0, 2], K_l[1, 2]
-
-    else:
-        calib = np.loadtxt(calib, delimiter=" ")
-        fx, fy, cx, cy = calib[:4]
-
-        K = np.eye(3)
-        K[0, 0] = fx
-        K[0, 2] = cx
-        K[1, 1] = fy
-        K[1, 2] = cy
-        K_l = K
-
-    if stereo:
-        imagedir_left = os.path.join(imagedir, "zedx_left")
-        imagedir_right = os.path.join(imagedir, "zedx_right")
-        image_list_left = sorted(os.listdir(imagedir_left))[::stride]
-        image_list_right = sorted(os.listdir(imagedir_right))[::stride]
-        assert len(image_list_left) == len(image_list_right)
-    else:
-        image_list = sorted(os.listdir(imagedir))[::stride]
-
-    total_images = len(image_list_left if stereo else image_list)
-
-    # Inner generator function
-    def generator():
-        for t, imfile in tqdm(enumerate(image_list_left if stereo else image_list), total=total_images, desc=f"Loading data", leave=False):
-            if stereo:
-                image_left = cv2.imread(os.path.join(imagedir_left, image_list_left[t]))
-                image_right = cv2.imread(
-                    os.path.join(imagedir_right, image_list_right[t])
-                )
-
-                # undistort with specific params
-                image_left = cv2.undistort(image_left, K_l, D_l)
-                image_right = cv2.undistort(image_right, K_r, D_r)
-
-                images = [image_left, image_right]
-            else:
-                image = cv2.imread(os.path.join(imagedir, imfile))
-                if len(calib) > 4:
-                    image = cv2.undistort(image, K_l, calib[4:])
-                images = [image]
-
-            h0, w0, _ = images[0].shape
-            h1 = image_size[0]
-            w1 = image_size[1]
-
-            images = [cv2.resize(img, (w1, h1)) for img in images]
-            images = [img[: h1 - h1 % 8, : w1 - w1 % 8] for img in images]
-            images = [torch.as_tensor(img).permute(2, 0, 1) for img in images]
-
-            images = torch.stack(images)
-
-            baseline = 0.1  # this gives better results than the true value -> correct scale afterwards
-            intrinsics = torch.as_tensor([fx, fy, cx, cy, baseline])
-            intrinsics[0:4:2] *= w1 / w0
-            intrinsics[1:4:2] *= h1 / h0
-
-            tstamp_s = float(imfile.split(".")[0]) / 1e6
-            yield tstamp_s, images, intrinsics
-
-    return generator(), total_images
-
-def image_stream(imagedir, calib, stride, stereo, image_size):
+def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepath=None):
     """image generator with batched multithreaded prefetching"""
 
     K_l = K_r = None
@@ -161,14 +68,34 @@ def image_stream(imagedir, calib, stride, stereo, image_size):
         K[1, 2] = cy
         K_l = K
 
+    # Load allowed timestamps from file (first column, in seconds -> convert to microseconds)
+    allowed_timestamps_us = None
+    if timestamps_filepath is not None:
+        allowed_timestamps_us = set()
+        with open(timestamps_filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ts_s = float(line.split()[0])
+                allowed_timestamps_us.add(round(ts_s * 1e6))
+
+    def filter_by_timestamps(image_list):
+        if allowed_timestamps_us is None:
+            return image_list
+        return [
+            fname for fname in image_list
+            if round(float(fname.split(".")[0])) in allowed_timestamps_us
+        ]
+
     if stereo:
         imagedir_left = os.path.join(imagedir, "zedx_left")
         imagedir_right = os.path.join(imagedir, "zedx_right")
-        image_list_left = sorted(os.listdir(imagedir_left))[::stride]
-        image_list_right = sorted(os.listdir(imagedir_right))[::stride]
+        image_list_left = filter_by_timestamps(sorted(os.listdir(imagedir_left))[::stride])
+        image_list_right = filter_by_timestamps(sorted(os.listdir(imagedir_right))[::stride])
         assert len(image_list_left) == len(image_list_right)
     else:
-        image_list = sorted(os.listdir(imagedir))[::stride]
+        image_list = filter_by_timestamps(sorted(os.listdir(imagedir))[::stride])
 
     total_images = len(image_list_left if stereo else image_list)
 
@@ -304,6 +231,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", default=[240, 320])
     parser.add_argument("--disable_vis", action="store_true")
 
+    parser.add_argument("--timestamps_path", type=str, help="path to timestamps file")
+
     parser.add_argument(
         "--beta",
         type=float,
@@ -415,7 +344,7 @@ if __name__ == "__main__":
 
     start_time = time.time()
     image_gen, num_of_images = image_stream(
-        args.imagedir, args.calib, args.stride, args.stereo, args.image_size
+        args.imagedir, args.calib, args.stride, args.stereo, args.image_size, args.timestamps_path
     )
     for t, (tstamp, image, intrinsics) in enumerate(image_gen):
         frame_time = time.time()
