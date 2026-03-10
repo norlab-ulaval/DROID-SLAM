@@ -382,13 +382,14 @@ if __name__ == "__main__":
         droid.track(tstamp, image, intrinsics=intrinsics)
 
         publish_pose = droid.video.counter.value != image_ctr
-        print(f"Processed frame {image_ctr} | Timestamp: {tstamp}")
-        print(f"{tstamp} {int(publish_pose)} {droid.video.counter.value} {image_ctr}\n")
 
         if droid.video is not None and droid.video.counter.value > 0 and publish_pose:
             pose_vec = droid.video.poses[droid.video.counter.value - 1].cpu().numpy()
             pose_c2w = (
                 SE3(torch.from_numpy(pose_vec).unsqueeze(0)).inv().data[0].cpu().numpy()
+            )
+            print(
+                f"Saved pose num. {image_ctr} for frame {ctr}/{num_of_images} | Timestamp: {tstamp}"
             )
 
             image_ctr += 1
