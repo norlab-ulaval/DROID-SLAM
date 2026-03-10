@@ -15,6 +15,7 @@ import time
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 from droid import Droid
 from droid_async import DroidAsync
@@ -69,38 +70,37 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
         K_l = K
 
     # Load allowed timestamps from file (first column, in seconds -> convert to microseconds)
-    print(f"Loading allowed timestamps from {timestamps_filepath}")
     allowed_timestamps_us = None
     if timestamps_filepath is not None:
-        allowed_timestamps_us = set()
-        with open(timestamps_filepath, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                ts_s = float(line.split()[0])
-                allowed_timestamps_us.add(round(ts_s * 1e6))
+        df_timestamps = pd.read_csv(timestamps_filepath, sep=" ", header=0)
+        allowed_timestamps_us = (
+            df_timestamps["timestamp"].apply(lambda x: round(x * 1e6)).tolist()
+        )
 
     def filter_by_timestamps(image_list):
         if allowed_timestamps_us is None:
             return image_list
         return [
-            fname for fname in image_list
+            fname
+            for fname in image_list
             if round(float(fname.split(".")[0])) in allowed_timestamps_us
         ]
 
     if stereo:
         imagedir_left = os.path.join(imagedir, "zedx_left")
         imagedir_right = os.path.join(imagedir, "zedx_right")
-        image_list_left = filter_by_timestamps(sorted(os.listdir(imagedir_left))[::stride])
-        image_list_right = filter_by_timestamps(sorted(os.listdir(imagedir_right))[::stride])
+        image_list_left = filter_by_timestamps(
+            sorted(os.listdir(imagedir_left))[::stride]
+        )
+        image_list_right = filter_by_timestamps(
+            sorted(os.listdir(imagedir_right))[::stride]
+        )
         assert len(image_list_left) == len(image_list_right)
     else:
         image_list = filter_by_timestamps(sorted(os.listdir(imagedir))[::stride])
 
     total_images = len(image_list_left if stereo else image_list)
-
-    print(f"Total images: {total_images}")
+    print("Total images: ", total_images)
 
     # Isolated worker function for a single frame index
     def process_frame(t):
@@ -147,8 +147,13 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
             batch_results = []
 
             # Use threads to fetch the chunk concurrently
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-                future_to_idx = {executor.submit(process_frame, idx): idx for idx in indices_to_process}
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_workers
+            ) as executor:
+                future_to_idx = {
+                    executor.submit(process_frame, idx): idx
+                    for idx in indices_to_process
+                }
 
                 for future in concurrent.futures.as_completed(future_to_idx):
                     try:
@@ -180,7 +185,7 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
         fetcher_thread = threading.Thread(
             target=batch_fetcher,
             args=(batch_queue, batch_size, num_workers),
-            daemon=True
+            daemon=True,
         )
         fetcher_thread.start()
 
@@ -318,6 +323,10 @@ if __name__ == "__main__":
         else:
             args.weight_output_dir = "exported_weights"
 
+    if args.timestamps_path is not None:
+        print(f"Using timestamps from {args.timestamps_path}. Setting stride to 1")
+        args.stride = 1
+
     torch.multiprocessing.set_start_method("spawn")
 
     droid = None
@@ -347,13 +356,19 @@ if __name__ == "__main__":
 
     start_time = time.time()
     image_gen, num_of_images = image_stream(
-        args.imagedir, args.calib, args.stride, args.stereo, args.image_size, args.timestamps_path
+        args.imagedir,
+        args.calib,
+        args.stride,
+        args.stereo,
+        args.image_size,
+        args.timestamps_path,
     )
-    for t, (tstamp, image, intrinsics) in enumerate(image_gen):
+    image_ctr = 0
+    for ctr, (tstamp, image, intrinsics) in enumerate(image_gen):
         frame_time = time.time()
-        if args.max_frames > 0 and t >= args.max_frames:
+        if args.max_frames > 0 and ctr >= args.max_frames:
             break
-        if t < args.t0:
+        if ctr < args.t0:
             continue
 
         if not args.disable_vis:
@@ -366,45 +381,43 @@ if __name__ == "__main__":
 
         droid.track(tstamp, image, intrinsics=intrinsics)
 
-        odom_video = getattr(droid, "video1", getattr(droid, "video", None))
+        publish_pose = droid.video.counter.value != image_ctr
+        print(f"Processed frame {image_ctr} | Timestamp: {tstamp}")
+        print(f"{tstamp} {int(publish_pose)} {droid.video.counter.value} {image_ctr}\n")
 
-        if odom_video is not None and odom_video.counter.value > 0:
-            idx = odom_video.counter.value - 1
-            latest_tstamp = odom_video.tstamp[idx].cpu().item()
+        if droid.video is not None and droid.video.counter.value > 0 and publish_pose:
+            pose_vec = droid.video.poses[droid.video.counter.value - 1].cpu().numpy()
+            pose_c2w = (
+                SE3(torch.from_numpy(pose_vec).unsqueeze(0)).inv().data[0].cpu().numpy()
+            )
 
-            # Slice [idx:idx+1] to preserve the 2D tensor shape needed by SE3
-            latest_pose = odom_video.poses[idx : idx + 1]
-
-            # Convert to Camera-to-World
-            latest_pose_c2w = SE3(latest_pose).inv().data[0].cpu().numpy()
-
+            image_ctr += 1
             with open(incremental_odom_path, "a") as f:
-                p = latest_pose_c2w
-                f.write(
-                    f"{latest_tstamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n"
-                )
+                p = pose_c2w[:3]
+                q = pose_c2w[3:]
+                f.write(f"{tstamp} {p[0]} {p[1]} {p[2]} {q[0]} {q[1]} {q[2]} {q[3]}\n")
 
         elapsed = time.time() - start_time
-        fps = (t + 1) / elapsed if elapsed > 0 else 0
+        fps = (ctr + 1) / elapsed if elapsed > 0 else 0
         print(
-            f"Processed frame {t}/{num_of_images} (tstamp={tstamp:.2f}) in {time.time() - frame_time:.2f} seconds."
+            f"Processed frame {ctr}/{num_of_images} (tstamp={tstamp:.2f}) in {time.time() - frame_time:.2f} seconds."
         )
 
     print(
-        f"Finished tracking {t + 1} frames. Total time: {time.time() - start_time:.2f} seconds."
+        f"Finished tracking {ctr + 1} frames. Total time: {time.time() - start_time:.2f} seconds."
     )
 
     # Save Pre-SLAM Odometry Trajectory
-    if hasattr(droid, "video1"):
-        odom_video = droid.video1
-    elif hasattr(droid, "video"):
+    if hasattr(droid, "video"):
         odom_video = droid.video
     else:
         odom_video = None
 
     if args.pgo:
         print("Terminating tracking and extracting poses...")
-        image_gen, _ = image_stream(args.imagedir, args.calib, args.stride, args.stereo, args.image_size)
+        image_gen, _ = image_stream(
+            args.imagedir, args.calib, args.stride, args.stereo, args.image_size
+        )
         traj_est = droid.terminate(image_gen)
 
         # Save Trajectory (TUM Format) using C2W poses
