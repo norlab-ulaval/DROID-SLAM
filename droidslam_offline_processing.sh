@@ -27,7 +27,7 @@ process_trajectory() {
                     --stereo \
                     --disable_vis \
                     --trajectory_path "${output_path_host}/${date}/${dataset}/${dataset}_${dataset}.txt" \
-                    --buffer 10000 \
+                    --buffer 25000 \
                     --t0 0 \
                     --pgo \
                     --stride 1 \
