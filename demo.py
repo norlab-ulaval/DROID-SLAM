@@ -174,7 +174,7 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
 
     # The main generator function yielded to SLAM
     def generator():
-        batch_size = 300
+        batch_size = 1000
         num_workers = 20
 
         # maxsize=1 means memory holds maximum 2 batches at a time
@@ -418,7 +418,10 @@ if __name__ == "__main__":
         image_gen, _ = image_stream(
             args.imagedir, args.calib, args.stride, args.stereo, args.image_size
         )
+
+        start_time = time.time()
         traj_est = droid.terminate(image_gen)
+        print(f"Finished PGO in {time.time() - start_time:.2f} seconds.")
 
         # Save Trajectory (TUM Format) using C2W poses
         if hasattr(droid, "video2"):
