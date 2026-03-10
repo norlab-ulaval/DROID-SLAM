@@ -424,11 +424,7 @@ if __name__ == "__main__":
         traj_est = droid.terminate(image_gen)
         print(f"Finished PGO in {time.time() - start_time:.2f} seconds.")
 
-        # Save Trajectory (TUM Format) using C2W poses
-        if hasattr(droid, "video2"):
-            video = droid.video2
-        else:
-            video = droid.video
+        video = droid.video
 
         tstamps = video.tstamp[: video.counter.value].cpu().numpy()
         poses_c2w = SE3(video.poses[: video.counter.value]).inv().data.cpu().numpy()

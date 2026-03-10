@@ -108,6 +108,6 @@ class Droid:
             else:
                 print("No weights found in graph.")
 
-        camera_trajectory = self.traj_filler(stream)
-        return camera_trajectory.inv().data.cpu().numpy()
+        # camera_trajectory = self.traj_filler(stream)
+        # return camera_trajectory.inv().data.cpu().numpy()
 
