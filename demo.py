@@ -69,6 +69,7 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
         K_l = K
 
     # Load allowed timestamps from file (first column, in seconds -> convert to microseconds)
+    print(f"Loading allowed timestamps from {timestamps_filepath}")
     allowed_timestamps_us = None
     if timestamps_filepath is not None:
         allowed_timestamps_us = set()
@@ -98,6 +99,8 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
         image_list = filter_by_timestamps(sorted(os.listdir(imagedir))[::stride])
 
     total_images = len(image_list_left if stereo else image_list)
+
+    print(f"Total images: {total_images}")
 
     # Isolated worker function for a single frame index
     def process_frame(t):
