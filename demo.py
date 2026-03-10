@@ -363,6 +363,8 @@ if __name__ == "__main__":
         args.image_size,
         args.timestamps_path,
     )
+    args.buffer = int(num_of_images)
+    print("Buffer size:", args.buffer)
     image_ctr = 0
     for ctr, (tstamp, image, intrinsics) in enumerate(image_gen):
         frame_time = time.time()
