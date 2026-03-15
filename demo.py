@@ -72,9 +72,9 @@ def image_stream(imagedir, calib, stride, stereo, image_size, timestamps_filepat
     # Load allowed timestamps from file (first column, in seconds -> convert to microseconds)
     allowed_timestamps_us = None
     if timestamps_filepath is not None:
-        df_timestamps = pd.read_csv(timestamps_filepath, sep=" ", header=0)
+        df_timestamps = pd.read_csv(timestamps_filepath, sep=" ", header=None)
         allowed_timestamps_us = (
-            df_timestamps["timestamp"].apply(lambda x: round(x * 1e6)).tolist()
+            df_timestamps[0].apply(lambda x: round(x * 1e6)).tolist()
         )
 
     def filter_by_timestamps(image_list):
@@ -213,6 +213,16 @@ def save_reconstruction(droid, save_path):
         video = droid.video
 
     t = video.counter.value
+
+    # Edges to detect loop closures
+    if hasattr(droid, 'backend') and hasattr(droid.backend, 'graph'):
+        ii = droid.backend.graph.ii
+        jj = droid.backend.graph.jj
+        edges = torch.stack([ii, jj], dim=-1).cpu().numpy()
+    else:
+        print("Warning: Edge information not available (likely running in asynchronous mode).")
+        edges = np.zeros((0, 2), dtype=np.int32)
+
     print(f"Extracting reconstruction data for {t} frames...")
     save_data = {
         "tstamps": video.tstamp[:t].cpu(),
@@ -220,6 +230,7 @@ def save_reconstruction(droid, save_path):
         "disps": video.disps_up[:t].cpu(),
         "poses": video.poses[:t].cpu(),
         "intrinsics": video.intrinsics[:t].cpu(),
+        "edges": edges  # Ensure this is included!
     }
 
     print(f"Saving reconstruction map to {save_path}...")
@@ -419,7 +430,7 @@ if __name__ == "__main__":
     if args.pgo:
         print("Terminating tracking and extracting poses...")
         image_gen, _ = image_stream(
-            args.imagedir, args.calib, args.stride, args.stereo, args.image_size
+            args.imagedir, args.calib, args.stride, args.stereo, args.image_size, args.timestamps_path
         )
 
         start_time = time.time()
@@ -435,11 +446,7 @@ if __name__ == "__main__":
             traj_path = args.trajectory_path
             output_folder = os.path.dirname(traj_path)
         else:
-            output_folder = (
-                os.path.dirname(args.reconstruction_path)
-                if args.reconstruction_path
-                else "."
-            )
+            output_folder = "."
             traj_path = os.path.join(output_folder, "trajectory.txt")
 
         if output_folder and not os.path.exists(output_folder):
@@ -454,5 +461,5 @@ if __name__ == "__main__":
                     f"{timestamp} {p[0]} {p[1]} {p[2]} {p[3]} {p[4]} {p[5]} {p[6]}\n"
                 )
 
-        if args.reconstruction_path is not None:
-            save_reconstruction(droid, args.reconstruction_path)
+        reconstruction_path = os.path.join(output_folder, "reconstruction.pth")
+        save_reconstruction(droid, reconstruction_path)
